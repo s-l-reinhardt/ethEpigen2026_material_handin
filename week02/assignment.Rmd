@@ -17,7 +17,7 @@ suppressPackageStartupMessages({
 })
 ```
 
-```{r}
+```{r fetch_data, cache=TRUE}
 ah<-AnnotationHub()
 ```
 
@@ -50,16 +50,12 @@ cat("Number of unique Ensembl gene IDs:", num_gene_ids, "\n")
 cat("Number of unique gene symbols:", num_gene_symbols, "\n")
 ```
 ```{r}
-# 1. Extract exons, but only for protein-coding transcripts.
-pc_exons <- exons(mouse_ensdb, 
-                  filter = ~ tx_biotype == "protein_coding", 
-                  columns = c("tx_id"))
-
-# 2. Split the exons by their transcript ID
-exons_by_tx <- split(pc_exons, pc_exons$tx_id)
+# 1 & 2 combined: Use exonsBy() to fetch exons grouped by transcript directly
+exons_by_tx <- exonsBy(mouse_ensdb, 
+                       by = "tx", 
+                       filter = ~ tx_biotype == "protein_coding")
 
 # 3. Sum the width of the exons for each transcript
-
 spliced_tx_lengths <- sum(width(exons_by_tx))
 
 # 4. Plot the distribution
