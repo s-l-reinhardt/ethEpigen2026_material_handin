@@ -1,0 +1,93 @@
+---
+title: "assignment"
+author: "Sophie Reinhardt"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# SET YOUR WORKING DIRECTORY
+knitr::opts_knit$set(root.dir = 'C:/Users/slrei/Documents/ETH/FS26/Bioinformatics/W03')
+
+```
+
+
+```{r}
+
+suppressPackageStartupMessages({
+  library(AnnotationHub)
+  library(Rsubread)
+  library(rtracklayer)
+  library(Rfastp)
+  library(epiwraps) 
+})
+```
+
+## Schritt 1: Download
+```{r download, eval=FALSE}
+options(timeout=3600)
+if(!dir.exists("raw")) dir.create("raw")
+download.file("[https://www.encodeproject.org/files/ENCFF127RRR/@@download/ENCFF127RRR.fastq.gz](https://www.encodeproject.org/files/ENCFF127RRR/@@download/ENCFF127RRR.fastq.gz)", 
+              destfile = "raw/ctcf.fastq.gz", mode="wb")
+```
+
+## Schritt 2: Trimming
+```{r qc, eval=FALSE}
+dir.create("trimmed", showWarnings = FALSE)
+# Rfastp reinigt die Daten
+qc <- Rfastp::rfastp("raw/ctcf.fastq.gz", outputFastq="trimmed/assignment_trimmed")
+```
+
+## Schritt 3: Alignment
+```{r alignment, eval=FALSE}
+ah <- AnnotationHub()
+genome <- ah[["AH49674"]] # Drosophila Genom
+
+dir.create("genome_idx", showWarnings = FALSE)
+export(import.2bit(genome), "genome_idx/genome.fasta.gz", compress=TRUE)
+
+# Index bauen und Aligment durchführen
+Rsubread::buildindex("genome_idx/rsubread", reference="genome_idx/genome.fasta.gz")
+
+dir.create("aligned", showWarnings = FALSE)
+stats <- Rsubread::align(index="genome_idx/rsubread", 
+                         readfile1="trimmed/assignment_trimmed_R1.fastq.gz",
+                         output_file="aligned/assignment_ctcf.bam", 
+                         nthreads=4, 
+                         sortReadsByCoordinates=TRUE)
+```
+
+## Schritt 4: Peak Calling (Alternative Methode)
+```{r peaks, eval=FALSE}
+
+
+peaks <- callPeaks("aligned/assignment_ctcf.bam", gsize = 1.2e8) # gsize für Drosophila
+
+# Speichere die Peaks, damit sie im Ordner liegen
+dir.create("peaks", showWarnings = FALSE)
+export(peaks, "peaks/assignment_ctcf_peaks.bed")
+```
+
+## Schritt 5: Ergebnisse für den Report
+```{r results, echo=FALSE, eval=FALSE}
+total_reads <- stats$Total_reads
+mapped_reads <- stats$Mapped_reads
+perc_mapped <- (mapped_reads / total_reads) * 100
+num_peaks <- length(peaks)
+
+cat("--- ASSIGNMENT REPORT NUMBERS ---\n")
+cat("1. Total Mapped Reads: ", mapped_reads, "\n")
+cat("2. Percentage Mapped:  ", round(perc_mapped, 2), "%\n")
+cat("3. Total Peaks Found:  ", num_peaks, "\n")
+```
+
+## Schritt 6: Plot
+```{r plot, eval=FALSE}
+# Finde Peaks in Genen
+gene_regions <- import.2bit(genome)
+peaks_in_genes <- peaks[overlapsAny(peaks, gene_regions)]
+
+# Plot des ersten Peaks
+plotSignalTracks(list(CTCF="aligned/assignment_ctcf.bam"), 
+                 region=peaks_in_genes[1], 
+                 extend=5000)
+```
