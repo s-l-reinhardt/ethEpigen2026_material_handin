@@ -1,0 +1,206 @@
+---
+title: "assignment trial 2 week 4"
+output: html_document
+date: "2026-03-11"
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache=TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(AnnotationHub)
+  library(ensembldb)
+  library(GenomicRanges)
+  library(epiwraps)
+  library(rtracklayer)
+  library(ggplot2)
+  library(viridisLite)
+})
+```
+
+```{r annotationhub, cache = TRUE}
+ah <- AnnotationHub(hub = "C:/Users/slrei/Documents/ETH/FS26/Bioinformatics/Annotaioncache")
+ensdb <- ah[["AH89211"]]
+```
+#Download mESC and B6NCrl liver tissue
+```{r download, cache=TRUE}
+
+# Set timeout to 1 hour
+options(timeout = 3600)
+
+# Create folders (these won't overwrite if they already exist)
+dir.create("peaksmESC", showWarnings = FALSE)
+dir.create("tracksmESC", showWarnings = FALSE)
+dir.create("peaksliver", showWarnings = FALSE)
+dir.create("tracksliver", showWarnings = FALSE)
+
+# Your original list name and structure
+mesc_downloads <- c(
+  # PEAKSmESC (BED)
+  "peaksmESC/p300.bed.gz"      = "[https://www.encodeproject.org/files/ENCFF179FJG/@@download/ENCFF179FJG.bed.gz](https://www.encodeproject.org/files/ENCFF179FJG/@@download/ENCFF179FJG.bed.gz)",
+  "peaksmESC/H3K27ac.bed.gz"   = "[https://www.encodeproject.org/files/ENCFF194TQD/@@download/ENCFF194TQD.bed.gz](https://www.encodeproject.org/files/ENCFF194TQD/@@download/ENCFF194TQD.bed.gz)",
+  "peaksmESC/H3K27me3.bed.gz"  = "[https://www.encodeproject.org/files/ENCFF276FGU/@@download/ENCFF276FGU.bed.gz](https://www.encodeproject.org/files/ENCFF276FGU/@@download/ENCFF276FGU.bed.gz)",
+  
+  # TRACKSmESC (BigWig)
+  "tracksmESC/p300.bw"         = "[https://www.encodeproject.org/files/ENCFF612UFO/@@download/ENCFF612UFO.bigWig](https://www.encodeproject.org/files/ENCFF612UFO/@@download/ENCFF612UFO.bigWig)",
+  "tracksmESC/H3K27ac.bw"      = "[https://www.encodeproject.org/files/ENCFF230RNU/@@download/ENCFF230RNU.bigWig](https://www.encodeproject.org/files/ENCFF230RNU/@@download/ENCFF230RNU.bigWig)",
+  "tracksmESC/H3K27me3.bw"     = "[https://www.encodeproject.org/files/ENCFF595SIA/@@download/ENCFF595SIA.bigWig](https://www.encodeproject.org/files/ENCFF595SIA/@@download/ENCFF595SIA.bigWig)",
+  
+  # PEAKSliver (BED)
+  "peaksliver/p300.bed.gz"     = "[https://www.encodeproject.org/files/ENCFF326YGO/@@download/ENCFF326YGO.bed.gz](https://www.encodeproject.org/files/ENCFF326YGO/@@download/ENCFF326YGO.bed.gz)",
+  "peaksliver/H3K27ac.bed.gz"  = "[https://www.encodeproject.org/files/ENCFF290MLR/@@download/ENCFF290MLR.bed.gz](https://www.encodeproject.org/files/ENCFF290MLR/@@download/ENCFF290MLR.bed.gz)",
+  "peaksliver/H3K27me3.bed.gz" = "[https://www.encodeproject.org/files/ENCFF829MMU/@@download/ENCFF829MMU.bed.gz](https://www.encodeproject.org/files/ENCFF829MMU/@@download/ENCFF829MMU.bed.gz)",
+  
+  # TRACKS (BigWig)
+  "tracksliver/p300.bw"        = "[https://www.encodeproject.org/files/ENCFF735IOF/@@download/ENCFF735IOF.bigWig](https://www.encodeproject.org/files/ENCFF735IOF/@@download/ENCFF735IOF.bigWig)",
+  "tracksliver/H3K27ac.bw"     = "[https://www.encodeproject.org/files/ENCFF734CDU/@@download/ENCFF734CDU.bigWig](https://www.encodeproject.org/files/ENCFF734CDU/@@download/ENCFF734CDU.bigWig)",
+  "tracksliver/H3K27me3.bw"    = "[https://www.encodeproject.org/files/ENCFF740TDV/@@download/ENCFF740TDV.bigWig](https://www.encodeproject.org/files/ENCFF740TDV/@@download/ENCFF740TDV.bigWig)"
+)
+
+# The loop - checks if file exists before downloading
+for (i in seq_along(mesc_downloads)) {
+  dest <- names(mesc_downloads)[i]
+  link <- mesc_downloads[i]
+  
+  if (!file.exists(dest)) {
+    message("Downloading: ", dest)
+    try(download.file(link, dest, mode = "wb", method = "libcurl"))
+  } else {
+    message("File already exists: ", dest)
+  }
+}
+```
+
+
+#Import and reorganise the Data
+```{r}
+
+
+# Load mESC peaks
+mesc_files <- list.files("peaksmESC", full.names = TRUE, pattern = "\\.bed\\.gz$")
+names(mesc_files) <- gsub("\\.bed\\.gz", "", basename(mesc_files))
+peaks_mESC <- lapply(mesc_files, rtracklayer::import, format="narrowPeak")
+
+# Load Liver peaks
+liver_files <- list.files("peaksliver", full.names = TRUE, pattern = "\\.bed\\.gz$")
+names(liver_files) <- gsub("\\.bed\\.gz", "", basename(liver_files))
+peaks_liver <- lapply(liver_files, rtracklayer::import, format="narrowPeak")
+```
+
+#Question 1
+```{r}
+
+
+# Prepare TSS from your ensdb
+tss <- genes(ensdb)
+tss <- resize(tss, width = 1, fix = "start")
+tss <- GenomeInfoDb::keepStandardChromosomes(tss, pruning.mode = "coarse")
+GenomeInfoDb::seqlevelsStyle(tss) <- "UCSC"
+
+# Function to clean peak lists (Standardize chromosomes and style)
+clean_peaks <- function(peak_list) {
+  lapply(peak_list, function(x) {
+    x <- GenomeInfoDb::keepStandardChromosomes(x, pruning.mode = "coarse")
+    GenomeInfoDb::seqlevelsStyle(x) <- "UCSC"
+    return(x)
+  })
+}
+
+peaks_mESC <- clean_peaks(peaks_mESC)
+peaks_liver <- clean_peaks(peaks_liver)
+```
+
+
+```{r}
+#Trouble Shooting
+lengths(peaks_mESC)
+lengths(peaks_liver)
+length(tss)
+```
+
+
+```{r}
+
+
+get_props <- function(peak_list, tss_obj) {
+  ac <- mean(overlapsAny(tss_obj, peak_list$H3K27ac))
+  me3 <- mean(overlapsAny(tss_obj, peak_list$H3K27me3))
+  both <- mean(overlapsAny(tss_obj, peak_list$H3K27ac) & overlapsAny(tss_obj, peak_list$H3K27me3))
+  
+  return(c(Active_H3K27ac = ac, Repressed_H3K27me3 = me3, Bivalent = both))
+}
+
+# Calculate for both
+results_mESC <- get_props(peaks_mESC, tss)
+results_liver <- get_props(peaks_liver, tss)
+
+# Combine into a final table for your report
+final_comparison <- rbind(mESC = results_mESC, Liver = results_liver)
+print(round(final_comparison * 100, 2)) # Displays as percentages
+```
+
+In the Liver tissue, the proportion of TSS regions associated with the active H3K27ac mark is notably higher 20.2% compared to the mESC sample. Biologically, this reflects the transition from a pluripotent state to a lineage-committed state. While mESCs maintain a wide array of genes in a 'poised' or bivalent state to preserve potential, the Liver genome has undergone large-scale epigenetic remodeling to activate the specific metabolic and synthetic pathways required for hepatic function (Creyghton et al., 2010).
+
+Conversely, the percentage of TSS regions marked solely by the repressive H3K27me3 6.03% is lower than in mESCs. This suggests that in differentiated cells, long-range silencing of non-tissue-specific genes may rely more on constitutive heterochromatin (H3K9me3) rather than the Polycomb-mediated H3K27me3, which is more characteristic of developmental plasticity (Bernstein et al., 2006). The reduction in bivalent overlaps (H3K27ac + H3K27me3) further supports the conclusion that the Liver has 'resolved' its developmental uncertainty, opting for a more stable and specialized active transcriptome.
+
+#Question 2
+```{r}
+# 1. The UpSet Plot for mESC
+
+upset_mESC <- epiwraps::regionsToUpset(peaks_mESC)
+ComplexHeatmap::UpSet(ComplexHeatmap::make_comb_mat(upset_mESC))
+
+
+```
+
+```{r}
+# 1. The UpSet Plot for Liver
+upset_liver <- epiwraps::regionsToUpset(peaks_liver)
+ComplexHeatmap::UpSet(ComplexHeatmap::make_comb_mat(upset_liver))
+```
+
+The transition from pluripotency to a differentiated state is marked by a fundamental restructuring of the epigenetic landscape. In mESCs, the genome is characterized by high "plasticity," maintained through a massive reservoir of the repressive H3K27me3 mark (over 100,000 peaks) and a high frequency of bivalent domains, where repressive marks overlap with p300 or H3K27ac. These bivalent signatures "poise" developmental genes for future activation while preventing premature differentiation (Bernstein et al., 2006). The mESC UpSet plot confirms this by showing significant intersections between p300 and H3K27me3, representing a flexible regulatory state that is absent in specialized tissues.
+
+In contrast, the Liver tissue exhibits a "resolved" epigenetic signature where developmental potential has been traded for functional efficiency. The broad, Polycomb-mediated repression seen in stem cells is largely lost, replaced by a dominant active-only H3K27ac signature that drives liver-specific metabolic and synthetic pathways. The regulatory shift is most visible in the p300 distribution: while mESC p300 peaks are often bivalent or "poised," Liver p300 peaks almost exclusively overlap with H3K27ac. This demonstrates a move from genomic flexibility to terminal lineage commitment, where enhancers are either fully activated to maintain tissue identity or permanently decommissioned (Rada-Iglesias et al., 2011; Shen et al., 2012).
+
+#Question 3
+```{r}
+# Prepare the Signal Files (BigWigs)
+# This includes both tissues side-by-side
+signals <- c(
+  "mESC p300"    = "tracksmESC/p300.bw",
+  "mESC K27ac"   = "tracksmESC/H3K27ac.bw",
+  "mESC K27me3"  = "tracksmESC/H3K27me3.bw",
+  "Liver p300"   = "tracksliver/p300.bw",
+  "Liver K27ac"  = "tracksliver/H3K27ac.bw",
+  "Liver K27me3" = "tracksliver/H3K27me3.bw"
+)
+
+```
+
+```{r}
+# Heatmap trial
+
+
+target <- GenomicRanges::resize(peaks_mESC$p300, width = 1, fix = "center")
+
+ml_raw <- epiwraps::signal2Matrix(signals, target, extend=2000, w=50)
+
+
+epiwraps::plotEnrichedHeatmaps(ml_raw, cluster_rows=TRUE, trim=c(0, 0.98))
+```
+The high enrichment of H3K27ac observed at the center of the mESC regulatory sites is a direct result of p300 recruitment, as p300 acts as the primary acetyltransferase responsible for depositing this active mark (Creyghton et al., 2010). This co-localization identifies these regions as functional, active enhancers within the pluripotent state. The sharp contrast seen in the Liver tracks—where the signal is almost entirely absent—highlights the extreme tissue-specificity of enhancer elements. While the underlying DNA sequence remains the same, the epigenetic 'activation' (H3K27ac) is stripped away during differentiation as p300 is redistributed to liver-specific loci, effectively decommissioning the mESC-specific regulatory network (Shen et al., 2012).
+
+#AI Disclaimer
+Deepl was used to polish english gramma and spelling mistakes. 
+
+
+#References: 
+Bernstein, B. E., Mikkelsen, T. S., Xie, X., Kamal, M., Huebert, D. J., Cuff, J., Fry, B., Meissner, A., Wernig, M., Plath, K., Jaenisch, R., Katsis, A., Russo, J., & Lander, E. S. (2006). A bivalent chromatin structure marks key developmental genes in embryonic stem cells. Cell, 125(2), 315–326. https://doi.org/10.1016/j.cell.2006.02.041
+
+Creyghton, M. P., Cheng, A. W., Welstead, G. G., Kooistra, T., Carey, B. W., Steine, E. J., Hanna, J., Lodato, M. A., Frampton, G. M., Sharp, P. A., Boyer, L. A., Young, R. A., & Jaenisch, R. (2010). Histone H3K27ac separates active from poised enhancers and predicts developmental state. Proceedings of the National Academy of Sciences, 107(50), 21931–21936. https://doi.org/10.1073/pnas.1016071107
+
+Rada-Iglesias, A., Bajpai, R., Swigut, T., Brugmann, S. A., Flynn, R. A., & Wysocka, J. (2011). A unique chromatin signature uncovers early developmental enhancers in humans. Nature, 470(7333), 279–283
+
+Shen, Y., Yue, F., McCleary, D. F., Ye, Z., Edsall, L., Kuan, S., ... & Ren, B. (2012). A map of the cis-regulatory sequences in the mouse genome. Nature, 488(7409), 116–120
