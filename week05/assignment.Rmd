@@ -1,0 +1,113 @@
+---
+title: "assignment"
+output: html_document
+date: "2026-03-25"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(GenomicRanges)
+  library(SummarizedExperiment)
+  library(edgeR) 
+  library(epiwraps)
+  library(ggplot2)
+  library(sechm)
+})
+```
+
+```{r download}
+data_url <- "https://ethz-ins.org/content/mouse_mm38_hippocampus.peakCounts.SE.rds"
+dest_file <- "mouse_mm38_hippocampus.peakCounts.SE.rds"
+
+
+if (!file.exists(dest_file)) {
+  options(timeout = 3600)
+  download.file(data_url, dest_file, mode = "wb")
+  message("Data downloaded successfully.")
+} else {
+  message("Data loaded from local cache.")
+}
+
+
+se <- readRDS(dest_file)
+```
+
+```{r Data Cleaning and Preperation}
+# 1. Filter out Sex (X, Y) and Mitochondrial (MT) chromosomes to focus on autosomes --> otherwise heatmap is only focused X/Y genes 
+all_chrs <- seqlevels(se)
+chrs_to_keep <- all_chrs[!all_chrs %in% c("X", "Y", "MT")]
+se_sub <- se[seqnames(rowRanges(se)) %in% chrs_to_keep, ]
+seqlevels(se_sub) <- seqlevelsInUse(se_sub) # Clean up memory
+
+
+rownames(se_sub) <- paste0("peak_", 1:nrow(se_sub))
+
+#Extract metadata from sample names
+sample_names <- colnames(se_sub)
+se_sub$Condition <- factor(ifelse(grepl("Control", sample_names), "Control", "FSS"))
+se_sub$Sex <- factor(ifelse(grepl("female", sample_names), "Female", "Male"))
+
+# Verify 
+head(colData(se_sub))
+```
+
+```{r Differentical Analysis 1 (Stressed vs. Controll)}
+
+dds_stress <- edgeR::DGEList(assay(se_sub), group = se_sub$Condition) 
+
+# Default TMM normalization and estimate dispersions
+dds_stress <- edgeR::calcNormFactors(dds_stress) 
+dds_stress <- edgeR::estimateDisp(dds_stress)
+
+# Run the exact test for the FSS vs Control comparison
+et_stress <- exactTest(dds_stress)
+
+# Extract and print the top 10 most significant regions
+res_stress <- as.data.frame(topTags(et_stress, n = 10))
+print("Top 10 regions for Stressed (FSS) vs Control:")
+res_stress
+```
+
+```{r Heatmap for Stressed vs. Controll}
+# Put data into edgeR object using the Stress column
+assay(se_sub, "logcpm") <- log1p(cpm(dds_stress))
+
+
+topRegions_stress <- rownames(res_stress)
+
+# Plot heatmap grouped by Condition
+sechm(se_sub, features = topRegions_stress, gaps_at = "Condition", do.scale = TRUE)
+```
+
+```{r Differential Analysis 2 Male vs. Female}
+# Put data into edgeR object using the Sex column
+dds_sex <- edgeR::DGEList(assay(se_sub), group = se_sub$Sex) 
+
+# Default TMM normalization and estimate dispersions
+dds_sex <- edgeR::calcNormFactors(dds_sex) 
+dds_sex <- edgeR::estimateDisp(dds_sex)
+
+# Male vs Female comparison
+et_sex <- exactTest(dds_sex)
+
+# Extract and print the top 10 most significant regions
+res_sex <- as.data.frame(topTags(et_sex, n = 10))
+print("Top 10 regions for Male vs Female (Autosomes only):")
+res_sex
+```
+
+```{r Heatmap for Male vs. Female }
+# Sex normalization
+assay(se_sub, "logcpm") <- log1p(cpm(dds_sex))
+
+# Get the names of the top 10 regions
+topRegions_sex <- rownames(res_sex)
+
+# Plot heatmap grouped by Sex
+sechm(se_sub, features = topRegions_sex, gaps_at = "Sex", do.scale = TRUE)
+```
+
