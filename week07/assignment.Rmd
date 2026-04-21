@@ -1,0 +1,173 @@
+---
+title: "assignment"
+output: html_document
+date: "2026-04-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(epiwraps)
+  library(AnnotationHub)
+  library(MotifDb)
+  library(universalmotif)
+  library(motifmatchr)
+  library(ensembldb)
+  library(ggplot2)
+  library(rtracklayer)
+  library(sechm)
+  library(limma)
+  library(betterChromVAR)
+})
+```
+
+```{r}
+ah <- AnnotationHub(hub = "C:/Users/slrei/Documents/ETH/FS26/Bioinformatics/Annotaioncache")
+```
+#First Part
+```{r}
+options(timeout = 3600)
+if (!file.exists("atac.chr19.bam")) {
+  message("Downloading BAM file...")
+  download.file("https://ethz-ins.org/content/w7/atac.chr19.bam", "atac.chr19.bam", mode="wb")
+  download.file("https://ethz-ins.org/content/w7/atac.chr19.bam.bai", "atac.chr19.bam.bai", mode="wb")
+  message("Download complete!")
+} else {
+  message("BAM files already exist locally.")
+}
+```
+```{r}
+bam <- "atac.chr19.bam"
+
+# 1. Create a track using only nucleosome-free fragments, calculating the number of cuts/insertion sites
+# minFragLength=30 and maxFragLength=120 isolate the short fragments that fit between nucleosomes
+epiwraps::bam2bw(bam, output_bw = "NF_cuts.bw", paired=TRUE, binWidth=1L, type="ends", 
+                 minFragLength=30, maxFragLength=120, trim=4L, extend=3L, forceSeqlevelsStyle = "Ensembl")
+
+# 2. Create a track using only the centers of mono-nucleosome fragments
+# minFragLength=140 and maxFragLength=220 isolate the fragments wrapped around exactly one nucleosome
+epiwraps::bam2bw(bam, output_bw = "mono_centers.bw", paired=TRUE, binWidth=5L, 
+                 minFragLength=140, maxFragLength=220, type="center", trim=4L, extend=10L, forceSeqlevelsStyle = "Ensembl")
+```
+
+```{r}
+
+library(BSgenome.Mmusculus.UCSC.mm10)
+genome <- BSgenome.Mmusculus.UCSC.mm10
+
+
+motif <- MotifDb::query(MotifDb, c("CTCF", "Mus"))[[1]]
+
+
+motif2 <- universalmotif::convert_motifs(motif, class="TFBSTools-PFMatrix")
+
+
+chr19_gr <- GRanges("chr19", IRanges(1, seqlengths(genome)["chr19"]))
+
+moi <- motifmatchr::matchMotifs(motif2, chr19_gr, genome = genome, out="positions", p.cutoff=1e-5)[[1]]
+
+seqlevelsStyle(moi) <- "Ensembl"
+
+cat("Found", length(moi), "CTCF motifs on Chromosome 19.\n")
+```
+
+```{r}
+
+tracks <- c(NF_cuts = "NF_cuts.bw", mono_centers = "mono_centers.bw")
+
+
+sm <- epiwraps::signal2Matrix(tracks, moi, w=5, extend=300)
+
+
+epiwraps::plotEnrichedHeatmaps(sm, trim=0.95, multiScale = TRUE, axis_name = "CTCF Motif")
+
+
+d <- epiwraps::meltSignals(sm)
+
+ggplot(d, aes(position, mean, colour=sample)) + 
+  geom_line(size=1.2) +
+  theme_minimal() +
+  labs(title = "Nucleosome Positioning around CTCF Motifs",
+       x = "Distance from Motif Center (bp)",
+       y = "Average Signal") +
+  scale_color_manual(values = c("NF_cuts" = "darkred", "mono_centers" = "darkblue"))
+```
+
+#Second Part 
+```{r}
+
+options(timeout = 3600)
+if (!file.exists("peakCounts.rds")) {
+  message("Downloading peakCounts.rds...")
+  download.file("https://ethz-ins.org/content/mouse_mm38_hippocampus.peakCounts.SE.rds", "peakCounts.rds", mode="wb")
+}
+se <- readRDS("peakCounts.rds")
+sample_names <- colnames(se)
+se$Sex <- factor(ifelse(grepl("female", sample_names), "Female", "Male"))
+head(colData(se))
+```
+
+```{r}
+se <- GenomeInfoDb::keepStandardChromosomes(se, pruning.mode = "coarse")
+
+seqlevelsStyle(se) <- "UCSC"
+
+se <- addGCBias(se, genome = BSgenome.Mmusculus.UCSC.mm10)
+
+motifs <- MotifDb::query(MotifDb, "Mmusculus")
+motifs <- MotifDb::query(motifs, "JASPAR_CORE")
+
+motifs <- do.call(TFBSTools::PWMatrixList, universalmotif::convert_motifs(motifs, class="TFBSTools-PWMatrix"))
+
+names(motifs) <- make.unique(sapply(motifs, function(x) gsub("\\..+","",x@name)))
+
+cat("Prepared", length(motifs), "motifs for scanning.\n")
+```
+
+```{r}
+matches <- motifmatchr::matchMotifs(motifs, se, genome = BSgenome.Mmusculus.UCSC.mm10)
+dev <- betterChromVAR(se, matches)
+rownames(dev) <- names(motifs) # Keeping our name fix from earlier!
+dev
+```
+
+```{r}
+
+rownames(dev) <- names(motifs)
+
+is_female <- grepl("female", colnames(dev), ignore.case = TRUE)
+dev$Sex <- factor(ifelse(is_female, "Female", "Male"))
+
+assay(dev, "z")[is.na(assay(dev, "z"))] <- 0
+
+design <- model.matrix(~Sex, data = as.data.frame(colData(dev)))
+fit <- eBayes(limma::lmFit(assay(dev, "z"), design))
+res <- as.data.frame(limma::topTable(fit, coef = 2, number = Inf))
+res$motif <- row.names(res)
+
+p_volcano <- ggplot(res, aes(logFC, -log10(adj.P.Val))) + 
+  geom_point(alpha=0.5, color="darkgray") + 
+  geom_text(data=head(res, 15), aes(label=motif), vjust=-0.5, size=3) +
+  theme_minimal() +
+  labs(title="Differential Motif Accessibility: Male vs Female")
+print(p_volcano)
+
+top_candidates <- head(row.names(res), 20)
+
+cat("Plotting heatmap for top motifs:\n")
+print(top_candidates)
+
+sechm::sechm(dev, features = top_candidates, gaps_at = "Sex", assayName = "z")
+```
+```{r}
+# --- DIAGNOSTIC CHUNK ---
+cat("1. Number of ATAC-seq peaks:", nrow(se), "\n")
+cat("2. Number of Motifs prepared:", length(motifs), "\n")
+cat("3. Dimensions of dev object:", nrow(dev), "motifs by", ncol(dev), "samples\n")
+cat("4. Total missing (NA) values in dev:", sum(is.na(assay(dev, "z"))), "\n")
+cat("5. Rows in final results table:", nrow(res), "\n")
+```
+
