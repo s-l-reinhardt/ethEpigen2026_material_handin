@@ -1,0 +1,137 @@
+---
+title: "assignment"
+output: html_document
+date: "2026-04-27"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# 1. Load all required packages
+suppressPackageStartupMessages({
+  library(epiwraps)
+  library(ggplot2)
+  library(AnnotationHub)
+  library(ensembldb)
+  library(edgeR)
+  library(rtracklayer)
+  library(BiocParallel)
+  library(bsseq)   
+  library(DMRcate) 
+  library(pheatmap) 
+})
+
+```
+```{r}
+
+if (!file.exists("ESC_astrocytes_BSseq.rds")) {
+  
+  cat("Data not found. Downloading now (this might take a minute)...\n")
+  options(timeout = 6000) 
+  
+  
+  if (!file.exists("w11_practical.zip")) {
+    download.file("https://ethz-ins.org/content/w11_practical.zip", "w11_practical.zip")
+  }
+  
+  unzip("w11_practical.zip")
+  cat("Download and extraction complete!\n")
+  
+} else {
+  cat("Data already present! Skipping download.\n")
+}
+```
+
+```{r}
+bs <- readRDS("ESC_astrocytes_BSseq.rds")
+
+genes <- readRDS("hg19_chr1_genes.rds")
+
+bs
+```
+```{r}
+
+if (!file.exists("dmr_chr1.rds")) {
+  cat("Calculating chr1 DMRs (this will be much faster!)...\n")
+  
+  bs_filtered <- bs[rowSums(assay(bs, "Cov") > 0) == ncol(bs), ]
+  
+  bs_filtered <- bs_filtered[seqnames(bs_filtered) == "chr1", ]
+  
+  design <- model.matrix(~celltype, data = pData(bs_filtered)) 
+  methdesign <- modelMatrixMeth(design)
+  
+  bs_smoothed <- BSmooth(bs_filtered, BPPARAM = MulticoreParam(4, progress = TRUE))
+ 
+  seqAnnot <- sequencing.annotate(bs_smoothed, methdesign, all.cov = TRUE, coef = "celltypeastrocytes")
+  
+  dmrcateRes <- dmrcate(seqAnnot, C = 2, min.cpgs = 5)
+  dmrRanges <- extractRanges(dmrcateRes, genome = "hg19")
+  
+  saveRDS(dmrRanges, "dmr_chr1.rds")
+  cat("chr1 DMRs calculated and saved!\n")
+  
+} else {
+  cat("chr1 DMRs already calculated! Loading from file...\n")
+  dmrRanges <- readRDS("dmr_chr1.rds")
+}
+
+head(dmrRanges)
+```
+
+#Task 1 Chunk
+```{r}
+
+top5_dmrs <- head(dmrRanges[order(abs(dmrRanges$meandiff), decreasing = TRUE)], 5)
+
+overlapping_genes <- subsetByOverlaps(genes, top5_dmrs)
+
+met_genes <- bsseq::getMeth(bs, regions = overlapping_genes, type = "raw", what = "perRegion")
+
+rownames(met_genes) <- overlapping_genes$symbol
+
+pheatmap(met_genes, 
+         main = "Methylation of Genes in Top 5 chr1 DMRs",
+         cluster_cols = FALSE) # Keeps ESC and Astrocyte columns grouped together
+```
+#Task 2
+```{r}
+
+if (!file.exists("ATAC_AstroVsESC_subset.rds")) {
+  cat("Downloading ATAC-seq results...\n")
+  download.file("https://www.ethz-ins.org/content/ATAC_AstroVsESC_subset.rds", 
+                "ATAC_AstroVsESC_subset.rds")
+} else {
+  cat("ATAC-seq data already present! Skipping download.\n")
+}
+
+atac_res <- readRDS("ATAC_AstroVsESC_subset.rds")
+
+atac_chr1 <- atac_res[seqnames(atac_res) == "chr1"]
+
+head(atac_chr1)
+```
+
+```{r}
+
+overlaps <- findOverlaps(dmrRanges, atac_chr1)
+
+comparison_df <- data.frame(
+  Methylation_Diff = dmrRanges$meandiff[queryHits(overlaps)],
+  ATAC_logFC = atac_chr1$logFC[subjectHits(overlaps)]
+)
+
+ggplot(comparison_df, aes(x = Methylation_Diff, y = ATAC_logFC)) +
+  geom_point(alpha = 0.6, color = "darkblue") +
+  geom_smooth(method = "lm", color = "red", linetype = "dashed") + # Adds a trendline
+  theme_minimal() +
+  labs(
+    title = "DNA Methylation vs. Chromatin Accessibility (chr1)",
+    x = "Change in Methylation (meandiff)",
+    y = "Change in Accessibility (ATAC logFC)"
+  )
+```
+
+To assess the agreement between the two modalities, I identified the genomic regions where the differentially methylated regions (DMRs) physically overlapped with the differential ATAC-seq peaks on chromosome 1. By plotting the change in methylation (meandiff) against the change in accessibility (logFC), it shows that there is a negative correlation (indicated by the trendline). This demonstrates that as DNA methylation increases, chromatin accessibility tends to decrease, which is as expected that methylation is a repressive mark on the DNA.
