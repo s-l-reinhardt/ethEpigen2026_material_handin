@@ -1,0 +1,103 @@
+---
+title: "assignment"
+output: html_document
+date: "2026-05-11"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Libraries}
+
+suppressPackageStartupMessages({
+  library(GenomicRanges)
+  library(epiwraps)
+  library(ggplot2)
+  library(rGREAT)      # For Gene Ontology (GO) enrichment
+  library(rtracklayer) # For importing BED and BigWig files
+})
+
+
+```
+
+```{r download data}
+
+if (!file.exists("clustering_assignment.zip") && !file.exists("CREB1.bw")) {
+  cat("Downloading CREB family data...\n")
+  options(timeout = 6000)
+  download.file("https://ethz-ins.org/content/clustering_assignment.zip", 
+                "clustering_assignment.zip")
+  unzip("clustering_assignment.zip")
+  cat("Download and extraction complete!\n")
+} else {
+  cat("Data files already detected. Skipping download.\n")
+}
+
+peak_files <- list.files(pattern="bed$")
+peaks <- lapply(peak_files, rtracklayer::import.bed)
+
+peaks_filtered <- lapply(peaks, function(x) x[x$score > 800])
+
+regions <- reduce(unlist(GRangesList(peaks_filtered)))
+
+tracks <- list.files(pattern="bw$")
+
+cat("Regions prepared! Found", length(regions), "high-confidence regions on chr1.\n")
+cat("Found the following tracks:", paste(tracks, collapse=", "), "\n")
+```
+```{r signaling Matrix}
+
+ese <- signal2Matrix(tracks, regions, extend=500)
+#Check
+ese
+
+```
+
+```{r Clustering}
+
+plotEnrichedHeatmaps(ese)
+
+set.seed(123) # Ensuring we get the same clusters every time
+cl <- clusterSignalMatrices(ese, k=4, scaleRows = TRUE)
+
+
+rowData(ese)$cluster <- cl
+
+
+plotEnrichedHeatmaps(ese, 
+                     row_split = rowData(ese)$cluster, 
+                     colors = c("white", "darkred"),
+                     column_title = "CREB Family Clusters")
+```
+
+```{r Enrichment Analysis}
+
+split_regions <- split(rowRanges(ese), rowData(ese)$cluster)
+
+cat("Running enrichment for Cluster 1... this may take a moment.\n")
+res <- great(split_regions[["1"]], 
+             gene_sets = "GO:BP", 
+             tss_source = "hg38", 
+             background = regions)
+
+bp <- getEnrichmentTables(res)
+
+ggplot(head(bp, 15), aes(fold_enrichment, reorder(description, p_adjust), 
+                        size = observed_region_hits, color = -log10(p_adjust))) + 
+  geom_point() + 
+  scale_color_viridis_c() +
+  theme_minimal() +
+  labs(title = "GO Enrichment: Cluster 1",
+       x = "Fold Enrichment",
+       y = "Biological Process",
+       color = "-log10(Adj. P)")
+```
+
+The clustering analysis of the CREB transcription factor family on chromosome 1 reached a stable plateau at $k=4$ clusters. I performed a Gene Ontology (GO) enrichment analysis on Cluster 1, which represents genomic regions where Creb1, Creb3, and Creb3L1 show high co-binding. The CREB family is well-documented as a master regulator involved in essential cellular processes, including proliferation, differentiation, survival, and apoptosis [1][2].
+My results show a significant over-representation of terms such as "regulation of response to endoplasmic reticulum (ER) stress" and "acute inflammatory response to antigenic stimulus." This aligns with the literature, as ER stress and inflammatory signaling are core components of the pathways that dictate cell survival and apoptosis. Furthermore, the enrichment of terms like "regulation of intracellular protein transport" and "supramolecular fiber organization" suggests that CREB also coordinates the cell's physical and metabolic adaptation. Literature indicates that CREB acts as a "logistics" hub, regulating the transport of proteins and the organization of the cytoskeleton to help cells adapt to environmental changes [3].
+While all top 15 GO terms displayed an identical adjusted P-value ($9.9 \times 10^{-6}$), this is likely a statistical artifact of the restricted "universe" of genes on chromosome 1, where multiple biological processes are triggered by the same small group of genes. However, the high Fold Enrichment for inflammatory and stress-related terms confirms that these specific genomic regions are highly specialized for these regulatory functions.
+
+[1] Chowdhury MAR, Haq MM, Lee JH, Jeong S. Multi-faceted regulation of CREB family transcription factors. Front Mol Neurosci. 2024 Aug 6;17:1408949. doi: 10.3389/fnmol.2024.1408949. PMID: 39165717; PMCID: PMC11333461.
+[2] Altarejos, J. Y., & Montminy, M. (2011). CREB and the CRTC family of coactivators in metabolism. Nature Reviews Molecular Cell Biology, 12(3), 141-151.
+[3]Carlezon, W. A., Duman, R. S., & Nestler, E. J. (2005). The many faces of CREB. Trends in Neurosciences, 28(8), 436-445.
