@@ -1,0 +1,137 @@
+---
+title: "assignment"
+output: html_document
+date: "2026-04-13"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(AnnotationHub)
+  library(GenomicRanges)
+  library(ggplot2)
+  #library(memes) # for the meme-based methods -- COMMENT OUT when using alternatives
+  library(motifmatchr) # for scanning sequences for matches of given motifs
+  library(Biostrings) # for handling sequences
+  library(MotifDb) # database of motifs
+  library(TFBSTools) # for handling some motif formats
+  library(universalmotif) # for converting motifs to various formats
+  library(PWMEnrich) # for R-based motif enrichment analysis
+  library(GenomeInfoDb)
+  library(rtracklayer) # Added: essential for importing the bed.gz file!
+})
+```
+
+```{r}
+
+ah <- AnnotationHub(hub = "C:/Users/slrei/Documents/ETH/FS26/Bioinformatics/Annotaioncache")
+
+
+```
+
+```{r}
+
+options(timeout = 3600)
+
+# Create folder (won't overwrite if it already exists)
+dir.create("peaksTF", showWarnings = FALSE)
+
+
+tf_downloads <- c(
+  "peaksTF/ENCFF136DDO.bed.gz" = "https://www.encodeproject.org/files/ENCFF136DDO/@@download/ENCFF136DDO.bed.gz"
+)
+
+# The loop - checks if file exists before downloading
+for (i in seq_along(tf_downloads)) {
+  dest <- names(tf_downloads)[i]
+  link <- tf_downloads[i]
+  
+  if (!file.exists(dest)) {
+    message("Downloading: ", dest)
+    try(download.file(link, dest, mode = "wb"))
+  } else {
+    message("File already exists: ", dest)
+  }
+}
+```
+```{r}
+
+peaks <- rtracklayer::import("peaksTF/ENCFF136DDO.bed.gz", format="NarrowPeak")
+
+
+seqlevelsStyle(peaks) <- "Ensembl"  
+
+
+peaks_chr1 <- peaks[seqnames(peaks) == "1"]
+
+# Quick check to make sure it imported properly
+head(peaks_chr1)
+```
+EGR1 as motif
+```{r}
+
+
+library(BSgenome.Hsapiens.UCSC.hg38)
+genome <- BSgenome.Hsapiens.UCSC.hg38
+
+
+seqlevelsStyle(peaks_chr1) <- "UCSC"
+
+
+motifs <- query(MotifDb, c("EGR1"))
+
+
+motif <- motifs[[1]]
+
+
+universalmotif::view_motifs(motif)
+
+#  convert the motif to a format that motifmatchr accepts
+motif2 <- universalmotif::convert_motifs(motif, class="TFBSTools-PWMatrix")
+```
+
+```{r}
+# Scan the peaks for the motif positions
+moi <- motifmatchr::matchMotifs(motif2, subject=peaks_chr1, genome=genome, out="positions")
+moi <- moi[[1]] 
+
+
+peak_has_motif <- overlapsAny(peaks_chr1, moi)
+
+# Calculate proportions
+total_peaks <- length(peaks_chr1)
+peaks_with_motif <- sum(peak_has_motif)
+percentage <- (peaks_with_motif / total_peaks) * 100
+
+cat("Of the", total_peaks, "peaks,", peaks_with_motif, "(", round(percentage, 2), "%) contain a motif.\n")
+```
+
+```{r}
+
+chr1_gr <- GRanges("chr1", IRanges(1, seqlengths(genome)["chr1"]))
+
+
+genome_seqs <- Biostrings::getSeq(genome, chr1_gr)
+names(genome_seqs) <- "chr1"
+
+
+motif_across_chr1 <- motifmatchr::matchMotifs(motif2, subject=genome_seqs, out="positions")[[1]]
+
+
+names(motif_across_chr1) <- names(genome_seqs)
+motif_across_chr1 <- as(motif_across_chr1, "GRanges")
+
+
+motif_has_peak <- overlapsAny(motif_across_chr1, peaks_chr1)
+
+# Calculate proportions
+total_motifs <- length(motif_across_chr1)
+motifs_with_peak <- sum(motif_has_peak)
+percentage_motifs <- (motifs_with_peak / total_motifs) * 100
+
+cat("Of the", total_motifs, "motif instances,", motifs_with_peak, "(", round(percentage_motifs, 2), "%) overlap a peak.\n")
+```
+
