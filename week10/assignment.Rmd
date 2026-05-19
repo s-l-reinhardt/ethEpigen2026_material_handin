@@ -1,0 +1,156 @@
+---
+title: "assignment"
+output: html_document
+date: "2026-05-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries}
+suppressPackageStartupMessages({
+  library(GenomicRanges)
+  library(InteractionSet)
+  library(rtracklayer)
+  library(ggplot2)
+  library(GenomeInfoDb)
+})
+```
+
+```{r download_data}
+
+if (.Platform$OS.type == "windows") {
+  options(download.file.method = "wininet")
+} else {
+  options(download.file.method = "curl")
+}
+options(timeout = 1200)
+
+
+re2g_url  <- "[https://www.encodeproject.org/files/ENCFF202FID/@@download/ENCFF202FID.bed.gz](https://www.encodeproject.org/files/ENCFF202FID/@@download/ENCFF202FID.bed.gz)"
+tf_url    <- "[https://www.encodeproject.org/files/ENCFF566CTX/@@download/ENCFF566CTX.bed.gz](https://www.encodeproject.org/files/ENCFF566CTX/@@download/ENCFF566CTX.bed.gz)"
+prom_url  <- "[https://ethz-ins.org/content/hgEns104.promoters.rds](https://ethz-ins.org/content/hgEns104.promoters.rds)"
+
+re2g_file <- "re2g_links.bed"
+tf_file   <- "tf_peaks.bed"          # Adjusted to match your unzipped file
+prom_file <- "promoters.rds"
+
+
+download_safe <- function(url, dest) {
+  if (!file.exists(dest)) {
+    message(paste("Attempting download for:", dest))
+    tryCatch({
+      download.file(url, destfile = dest)
+    }, error = function(e) {
+      stop(paste0(
+        "\n\n[FILE MISSING] The file '", dest, "' was not found in your directory.\n",
+        "Please ensure you have moved your browser-downloaded file to this folder,\n",
+        "and that it is named exactly: '", dest, "'\n\n"
+      ))
+    })
+  } else {
+    message(paste("File successfully found locally, skipping download:", dest))
+  }
+}
+
+
+download_safe(re2g_url, re2g_file)
+download_safe(tf_url, tf_file)
+download_safe(prom_url, prom_file)
+
+cat("Data verification successful! Proceeding to processing.\n")
+```
+```{r parse_and_map}
+library(GenomeInfoDb)
+library(GenomicRanges)
+
+
+proms <- readRDS("promoters.rds")
+seqlevelsStyle(proms) <- "ensembl"
+
+peaks <- rtracklayer::import("tf_peaks.bed", format = "narrowPeak")
+seqlevelsStyle(peaks) <- "ensembl"
+
+
+re2g_df <- read.table("re2g_links.bed", header = FALSE, sep = "\t", stringsAsFactors = FALSE)
+
+
+re2g <- GRanges(
+  seqnames = re2g_df$V1,
+  ranges = IRanges(start = re2g_df$V2, end = re2g_df$V3)
+)
+seqlevelsStyle(re2g) <- "ensembl"
+
+
+re2g$gene_target <- re2g_df$V6
+
+o <- findOverlaps(peaks, re2g)
+
+mcols(peaks)$target <- CharacterList(vector("list", length(peaks)))
+mcols(peaks)[from(o), "target"] <- re2g$gene_target[to(o)]
+
+peaks_with_targets <- peaks[lengths(peaks$target) > 0]
+cat("Found", length(peaks_with_targets), "peaks with active rE2G loops.\n")
+```
+
+```{r trouble shooting}
+
+cat("Am I in the right folder?", file.exists("re2g_links.bed"), "\n")
+
+cat("File size in bytes:", file.info("re2g_links.bed")$size, "\n")
+```
+```{r analysis}
+
+peaks_expanded <- rep(peaks_with_targets, lengths(peaks_with_targets$target))
+mcols(peaks_expanded)$single_target <- unlist(peaks_with_targets$target)
+
+unique_proms <- proms[!duplicated(proms$gene_name)]
+
+target_match <- match(peaks_expanded$single_target, unique_proms$gene_name)
+
+valid_rows <- !is.na(target_match)
+peaks_expanded <- peaks_expanded[valid_rows]
+target_proms <- unique_proms[target_match[valid_rows]]
+
+peak_centers <- start(peaks_expanded) + width(peaks_expanded)/2
+tss_positions <- start(target_proms) + width(target_proms)/2
+is_downstream_genomic <- peak_centers > tss_positions
+
+peaks_expanded$direction <- ifelse(
+  as.character(strand(target_proms)) == "-",
+  ifelse(is_downstream_genomic, "upstream", "downstream"),
+  ifelse(is_downstream_genomic, "downstream", "upstream")
+)
+
+peaks_expanded$target_distance <- distance(peaks_expanded, target_proms)
+
+nearest_all <- distanceToNearest(peaks_expanded, unique_proms)
+peaks_expanded$closest_gene <- unique_proms$gene_name[subjectHits(nearest_all)]
+peaks_expanded$is_closest <- peaks_expanded$single_target == peaks_expanded$closest_gene
+
+upstream_set <- peaks_expanded[peaks_expanded$direction == "upstream"]
+downstream_set <- peaks_expanded[peaks_expanded$direction == "downstream"]
+
+prop_up <- mean(upstream_set$is_closest, na.rm=TRUE) * 100
+prop_down <- mean(downstream_set$is_closest, na.rm=TRUE) * 100
+
+cat(sprintf("Proportion where the UPSTREAM 3D target is the closest gene: %.2f%%\n", prop_up))
+cat(sprintf("Proportion where the DOWNSTREAM 3D target is the closest gene: %.2f%%\n", prop_down))
+```
+
+```{r plotting}
+ggplot(as.data.frame(peaks_expanded), aes(x = target_distance, fill = direction)) +
+  geom_density(alpha = 0.4) +
+  scale_x_log10(labels = scales::comma) +
+  theme_minimal() +
+  scale_fill_manual(values = c("upstream" = "#2980b9", "downstream" = "#e67e22")) +
+  labs(
+    title = "Genomic Distance: MYC Peaks to rE2G Target Promoters",
+    subtitle = "Stratified by relative structural topology",
+    x = "Distance to target TSS (bp, log10 scale)",
+    y = "Density Profiles",
+    fill = "Peak Position"
+  )
+```
+
